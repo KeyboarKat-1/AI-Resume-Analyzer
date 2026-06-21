@@ -558,6 +558,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
+            console.log('[PDF] Starting PDF generation...');
+            console.log('[PDF] Analysis data keys:', Object.keys(lastAnalysisData));
+
+            // Validate critical data fields before proceeding
+            const data = lastAnalysisData;
+            if (typeof data.ats_score === 'undefined' || data.ats_score === null) {
+                console.error('[PDF] Missing ats_score in analysis data');
+                alert('Analysis data is incomplete (missing ATS score). Please re-run the analysis.');
+                return;
+            }
+            if (!data.skill_gap || !data.career_insights) {
+                console.error('[PDF] Missing skill_gap or career_insights in analysis data');
+                alert('Analysis data is incomplete. Please re-run the analysis.');
+                return;
+            }
+
             // Change button state to loading
             const originalText = downloadBtn.innerHTML;
             downloadBtn.innerHTML = `
@@ -568,249 +584,45 @@ document.addEventListener('DOMContentLoaded', () => {
             `;
             downloadBtn.disabled = true;
 
-            const tempContainer = document.createElement('div');
-            tempContainer.style.position = 'absolute';
-            tempContainer.style.left = '-9999px';
-            tempContainer.style.top = '-9999px';
-            tempContainer.style.width = '720px';
-            tempContainer.style.background = 'white';
-            tempContainer.style.padding = '0px';
-            tempContainer.style.boxSizing = 'border-box';
-            
-            const data = lastAnalysisData;
-            
-            let improvementsHtml = '';
-            data.improvements.forEach(imp => {
-                let badgeColor = '#fef2f2';
-                let borderColor = '#fecaca';
-                let textColor = '#991b1b';
-                let priorityText = 'Critical';
-                if (imp.priority === 'important') {
-                    badgeColor = '#fffbeb';
-                    borderColor = '#fde68a';
-                    textColor = '#92400e';
-                    priorityText = 'Important';
-                } else if (imp.priority === 'nice-to-have') {
-                    badgeColor = '#f0fdf4';
-                    borderColor = '#bbf7d0';
-                    textColor = '#166534';
-                    priorityText = 'Nice to Have';
+            // =====================================================
+            // FIX: Send data to the new server-side PDF generator
+            // instead of using html2pdf.js which creates blank pages
+            // =====================================================
+            fetch('/download-report', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(lastAnalysisData)
+            })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Network response was not ok');
                 }
-                improvementsHtml += `
-                    <div style="border: 1px solid #e2e8f0; border-left: 4px solid ${textColor}; border-radius: 6px; padding: 12px 15px; background: #f8fafc; margin-bottom: 12px; page-break-inside: avoid;">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                            <span style="font-size: 13px; font-weight: 700; color: #0f172a;">${escapeHtml(imp.title)}</span>
-                            <span style="font-size: 9px; font-weight: 600; text-transform: uppercase; padding: 2px 6px; border-radius: 4px; background: ${badgeColor}; border: 1px solid ${borderColor}; color: ${textColor};">${priorityText}</span>
-                        </div>
-                        <p style="margin: 0; font-size: 12px; color: #475569; line-height: 1.4;">${escapeHtml(imp.description)}</p>
-                        <div style="margin-top: 6px; font-size: 10px; color: #64748b; font-weight: 500; text-transform: uppercase;">Category: ${escapeHtml(imp.category)}</div>
-                    </div>
-                `;
-            });
-
-            let matchedSkillsHtml = '';
-            data.skill_gap.matched_skills.forEach(skill => {
-                matchedSkillsHtml += `
-                    <div style="display: flex; justify-content: space-between; align-items: center; background: white; border: 1px solid #e2e8f0; border-radius: 4px; padding: 6px 10px; margin-bottom: 6px; page-break-inside: avoid;">
-                        <span style="font-size: 12px; font-weight: 600; color: #1e293b;">${escapeHtml(skill.name)}</span>
-                        <span style="font-size: 11px; font-weight: 700; color: #166534;">${skill.proficiency}%</span>
-                    </div>
-                `;
-            });
-
-            let missingSkillsHtml = '';
-            data.skill_gap.missing_skills.forEach(skill => {
-                missingSkillsHtml += `
-                    <div style="background: white; border: 1px solid #e2e8f0; border-radius: 4px; padding: 8px 10px; margin-bottom: 8px; page-break-inside: avoid;">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-                            <span style="font-size: 12px; font-weight: 700; color: #1e293b;">${escapeHtml(skill.name)}</span>
-                            <span style="font-size: 9px; font-weight: 600; text-transform: uppercase; padding: 1px 5px; border-radius: 3px; background: ${skill.importance === 'high' ? '#fee2e2' : '#fffbeb'}; color: ${skill.importance === 'high' ? '#991b1b' : '#92400e'};">${skill.importance}</span>
-                        </div>
-                        <p style="margin: 0; font-size: 11px; color: #475569; line-height: 1.3;">${escapeHtml(skill.recommendation)}</p>
-                    </div>
-                `;
-            });
-
-            let interviewQuestionsHtml = '';
-            data.interview_questions.forEach((q, idx) => {
-                interviewQuestionsHtml += `
-                    <div style="border: 1px solid #e2e8f0; border-radius: 6px; padding: 12px 15px; background: #f8fafc; margin-bottom: 12px; page-break-inside: avoid;">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px;">
-                            <span style="font-size: 11px; font-weight: 700; color: #475569; text-transform: uppercase;">Question ${idx + 1} (${escapeHtml(q.category)})</span>
-                            <span style="font-size: 9px; font-weight: 600; text-transform: uppercase; padding: 1px 5px; border-radius: 3px; background: ${q.difficulty === 'hard' ? '#fee2e2' : q.difficulty === 'medium' ? '#fffbeb' : '#f0fdf4'}; color: ${q.difficulty === 'hard' ? '#991b1b' : q.difficulty === 'medium' ? '#92400e' : '#166534'};">${q.difficulty}</span>
-                        </div>
-                        <p style="margin: 0 0 8px 0; font-size: 13px; font-weight: 600; color: #0f172a; line-height: 1.4;">"${escapeHtml(q.question)}"</p>
-                        <div style="background: white; border: 1px solid #e2e8f0; border-radius: 4px; padding: 8px 10px;">
-                            <div style="font-size: 10px; font-weight: 700; color: #64748b; text-transform: uppercase; margin-bottom: 2px;">Preparation Tips:</div>
-                            <p style="margin: 0; font-size: 11px; color: #475569; line-height: 1.3;">${escapeHtml(q.tips)}</p>
-                        </div>
-                    </div>
-                `;
-            });
-
-            let breakdownRowsHtml = '';
-            Object.entries(data.ats_breakdown).forEach(([cat, val]) => {
-                breakdownRowsHtml += `
-                    <tr style="border-bottom: 1px solid #e2e8f0;">
-                        <td style="padding: 10px; font-size: 13px; font-weight: 600; text-transform: capitalize; color: #1e293b;">${escapeHtml(cat)}</td>
-                        <td style="padding: 10px; width: 60%;">
-                            <div style="width: 100%; height: 6px; background: #e2e8f0; border-radius: 3px; overflow: hidden;">
-                                <div style="width: ${val}%; height: 100%; background: #3b82f6; border-radius: 3px;"></div>
-                            </div>
-                        </td>
-                        <td style="padding: 10px; font-size: 13px; font-weight: 700; text-align: right; color: #0f172a;">${val}%</td>
-                    </tr>
-                `;
-            });
-
-            let strengthsHtml = '';
-            data.career_insights.strengths.forEach(str => {
-                strengthsHtml += `<li style="margin-bottom: 4px; line-height: 1.4;">${escapeHtml(str)}</li>`;
-            });
-
-            let growthHtml = '';
-            data.career_insights.growth_areas.forEach(growth => {
-                growthHtml += `<li style="margin-bottom: 4px; line-height: 1.4;">${escapeHtml(growth)}</li>`;
-            });
-
-            tempContainer.innerHTML = `
-                <div style="font-family: 'Inter', system-ui, -apple-system, sans-serif; color: #1e293b; background: white; padding: 30px; line-height: 1.5;">
-                    <!-- Header -->
-                    <div style="border-bottom: 2px solid #3b82f6; padding-bottom: 12px; margin-bottom: 25px; display: flex; justify-content: space-between; align-items: flex-end;">
-                        <div>
-                            <h1 style="color: #0f172a; margin: 0; font-size: 24px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px;">CareerAI Pro</h1>
-                            <p style="color: #64748b; margin: 3px 0 0 0; font-size: 12px; font-weight: 500;">AI-Powered Career & Resume Analysis Report</p>
-                        </div>
-                        <div style="font-size: 11px; color: #94a3b8; font-weight: 500;">Generated on: ${new Date().toLocaleDateString()}</div>
-                    </div>
-
-                    <!-- Metrics Grid -->
-                    <div style="display: flex; gap: 15px; margin-bottom: 25px;">
-                        <div style="flex: 1; border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; background: #f8fafc; text-align: center; box-shadow: 0 1px 2px rgba(0,0,0,0.02);">
-                            <div style="font-size: 11px; color: #64748b; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">ATS Match Score</div>
-                            <div style="font-size: 40px; font-weight: 800; color: #3b82f6; margin: 5px 0;">${data.ats_score}<span style="font-size: 16px; color: #64748b; font-weight: 500;">/100</span></div>
-                            <div style="font-size: 12px; font-weight: 700; color: ${data.ats_score >= 80 ? '#166534' : data.ats_score >= 65 ? '#854d0e' : '#991b1b'};">
-                                ${data.ats_score >= 80 ? 'Excellent Match' : data.ats_score >= 65 ? 'Good Match' : data.ats_score >= 45 ? 'Fair Match' : 'Needs Improvement'}
-                            </div>
-                        </div>
-                        <div style="flex: 1; border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; background: #f8fafc; text-align: center; box-shadow: 0 1px 2px rgba(0,0,0,0.02);">
-                            <div style="font-size: 11px; color: #64748b; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Role Fit Index</div>
-                            <div style="font-size: 40px; font-weight: 800; color: #8b5cf6; margin: 5px 0;">${data.career_insights.role_fit}<span style="font-size: 16px; color: #64748b; font-weight: 500;">/100</span></div>
-                            <div style="font-size: 12px; color: #64748b; font-weight: 500;">Relative Candidate Suitability</div>
-                        </div>
-                    </div>
-
-                    <!-- Category Breakdown -->
-                    <div style="margin-bottom: 25px; page-break-inside: avoid;">
-                        <h2 style="font-size: 15px; color: #0f172a; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; margin: 0 0 12px 0; text-transform: uppercase; letter-spacing: 0.5px;">ATS Category Breakdown</h2>
-                        <table style="width: 100%; border-collapse: collapse;">
-                            <tbody>
-                                ${breakdownRowsHtml}
-                            </tbody>
-                        </table>
-                    </div>
-
-                    <div style="page-break-before: always;"></div>
-
-                    <!-- Resume Improvements -->
-                    <div style="margin-bottom: 25px;">
-                        <h2 style="font-size: 15px; color: #0f172a; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; margin: 0 0 12px 0; text-transform: uppercase; letter-spacing: 0.5px;">Critical Resume Improvements</h2>
-                        <div>
-                            ${improvementsHtml}
-                        </div>
-                    </div>
-
-                    <div style="page-break-before: always;"></div>
-
-                    <!-- Skill Gap Analysis -->
-                    <div style="margin-bottom: 25px;">
-                        <h2 style="font-size: 15px; color: #0f172a; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; margin: 0 0 15px 0; text-transform: uppercase; letter-spacing: 0.5px;">Skill Gap Analysis</h2>
-                        <div style="display: flex; gap: 15px;">
-                            <div style="flex: 1; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; background: #f8fafc; min-height: 250px;">
-                                <h3 style="font-size: 13px; color: #166534; margin: 0 0 10px 0; border-bottom: 1px solid #dcfce7; padding-bottom: 4px; display: flex; align-items: center; gap: 4px;">
-                                    ✓ Matched Skills
-                                </h3>
-                                <div>
-                                    ${matchedSkillsHtml}
-                                </div>
-                            </div>
-                            <div style="flex: 1; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; background: #f8fafc; min-height: 250px;">
-                                <h3 style="font-size: 13px; color: #991b1b; margin: 0 0 10px 0; border-bottom: 1px solid #fee2e2; padding-bottom: 4px; display: flex; align-items: center; gap: 4px;">
-                                    ⚠ Skills to Acquire
-                                </h3>
-                                <div>
-                                    ${missingSkillsHtml}
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div style="page-break-before: always;"></div>
-
-                    <!-- Predicted Interview Questions -->
-                    <div style="margin-bottom: 25px;">
-                        <h2 style="font-size: 15px; color: #0f172a; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; margin: 0 0 12px 0; text-transform: uppercase; letter-spacing: 0.5px;">Predicted Interview Questions</h2>
-                        <div>
-                            ${interviewQuestionsHtml}
-                        </div>
-                    </div>
-
-                    <div style="page-break-before: always;"></div>
-
-                    <!-- Career Insights -->
-                    <div style="margin-bottom: 10px;">
-                        <h2 style="font-size: 15px; color: #0f172a; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; margin: 0 0 12px 0; text-transform: uppercase; letter-spacing: 0.5px;">Career Insights & Development</h2>
-                        
-                        <div style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; background: #f8fafc; margin-bottom: 15px; page-break-inside: avoid;">
-                            <h3 style="font-size: 12px; color: #0f172a; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px;">Core Strengths</h3>
-                            <ul style="margin: 0; padding-left: 15px; font-size: 12px; color: #334155;">
-                                ${strengthsHtml}
-                            </ul>
-                        </div>
-
-                        <div style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; background: #f8fafc; margin-bottom: 15px; page-break-inside: avoid;">
-                            <h3 style="font-size: 12px; color: #0f172a; margin: 0 0 6px 0; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px;">Primary Development Gaps</h3>
-                            <ul style="margin: 0; padding-left: 15px; font-size: 12px; color: #334155;">
-                                ${growthHtml}
-                            </ul>
-                        </div>
-
-                        <div style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; background: #f8fafc; margin-bottom: 15px; page-break-inside: avoid;">
-                            <h3 style="font-size: 12px; color: #0f172a; margin: 0 0 4px 0; text-transform: uppercase; letter-spacing: 0.5px;">Recommended Path & Trajectory</h3>
-                            <p style="margin: 0; font-size: 12px; color: #334155; line-height: 1.4;">${escapeHtml(data.career_insights.career_trajectory)}</p>
-                        </div>
-
-                        <div style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; background: #f8fafc; page-break-inside: avoid;">
-                            <h3 style="font-size: 12px; color: #0f172a; margin: 0 0 4px 0; text-transform: uppercase; letter-spacing: 0.5px;">Earning Potential & Market Value</h3>
-                            <p style="margin: 0; font-size: 12px; color: #334155; line-height: 1.4;">${escapeHtml(data.career_insights.salary_context)}</p>
-                        </div>
-                    </div>
-                </div>
-            `;
-
-            document.body.appendChild(tempContainer);
-
-            const opt = {
-                margin: [10, 10, 10, 10],
-                filename: `CareerAI_Analysis_Report_${new Date().toISOString().slice(0, 10)}.pdf`,
-                image: { type: 'jpeg', quality: 0.98 },
-                html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' },
-                jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-                pagebreak: { mode: ['css', 'legacy'] }
-            };
-
-            html2pdf().set(opt).from(tempContainer).save().then(() => {
-                document.body.removeChild(tempContainer);
+                return response.blob();
+            })
+            .then(blob => {
+                console.log('[PDF] PDF received from server successfully.');
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.style.display = 'none';
+                a.href = url;
+                // Generate a filename with current date
+                const dateStr = new Date().toISOString().slice(0, 10);
+                a.download = `CareerAI_Report_${dateStr}.pdf`;
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+                
                 downloadBtn.innerHTML = originalText;
                 downloadBtn.disabled = false;
-            }).catch(err => {
-                console.error('Error generating PDF:', err);
-                if (tempContainer.parentNode) {
-                    document.body.removeChild(tempContainer);
-                }
+            })
+            .catch(error => {
+                console.error('[PDF] Error downloading PDF:', error);
                 downloadBtn.innerHTML = originalText;
                 downloadBtn.disabled = false;
-                alert('Failed to generate PDF. Please try again.');
+                alert('Failed to download PDF. Please try again. Check the browser console for details.');
             });
         });
     }
