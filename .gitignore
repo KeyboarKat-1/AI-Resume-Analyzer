@@ -1,0 +1,23 @@
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Environment variables
+.env
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Uploads directory
+uploads/
+
+# Generated PDFs
+*.pdf
+
+# IDE/OS files
+.vscode/
+.idea/
+.DS_Store
