@@ -21,3 +21,7 @@ uploads/
 .vscode/
 .idea/
 .DS_Store
+.env
+__pycache__/
+.env
+__pycache__/

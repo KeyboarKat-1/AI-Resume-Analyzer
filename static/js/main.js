@@ -312,6 +312,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 }, 200 + index * 150);
             }
         });
+
+        const keywordMatch = data.keyword_match || {};
+        ['matched_required', 'missing_required', 'matched_preferred', 'missing_preferred'].forEach(group => {
+            const list = document.getElementById(`${group.replace(/_/g, '-')}-keywords`);
+            if (!list) return;
+            list.innerHTML = '';
+            (keywordMatch[group] || []).forEach(item => {
+                const li = document.createElement('li');
+                li.textContent = `${item.name} — ${item.evidence || 'Not found'}`;
+                list.appendChild(li);
+            });
+            if (!list.children.length) {
+                const li = document.createElement('li');
+                li.textContent = 'None detected';
+                list.appendChild(li);
+            }
+        });
     }
 
     // ==========================================
@@ -420,8 +437,12 @@ document.addEventListener('DOMContentLoaded', () => {
     function renderSkillGap(data) {
         const matchedList = document.getElementById('matched-skills');
         const missingList = document.getElementById('missing-skills');
+        const partialList = document.getElementById('partial-skills');
+        const additionalList = document.getElementById('additional-skills');
         matchedList.innerHTML = '';
         missingList.innerHTML = '';
+        if (partialList) partialList.innerHTML = '';
+        if (additionalList) additionalList.innerHTML = '';
 
         const skillGap = data.skill_gap || {};
 
@@ -435,11 +456,12 @@ document.addEventListener('DOMContentLoaded', () => {
             item.innerHTML = `
                 <div class="skill-header">
                     <span class="skill-name">${escapeHtml(skill.name)}</span>
-                    <span class="skill-value">${skill.proficiency}%</span>
+                    <span class="skill-value">${skill.proficiency}% ${escapeHtml(skill.status || '')}</span>
                 </div>
                 <div class="skill-bar">
                     <div class="skill-bar-fill" data-width="${skill.proficiency}"></div>
                 </div>
+                <p class="missing-skill-rec">${escapeHtml(skill.evidence || '')}</p>
             `;
 
             matchedList.appendChild(item);
@@ -464,6 +486,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
             missingList.appendChild(item);
         });
+
+        const renderEvidenceList = (list, items) => {
+            if (!list) return;
+            (items || []).forEach(skill => {
+                const item = document.createElement('div');
+                item.className = 'missing-skill-item';
+                item.innerHTML = `<div class="missing-skill-header"><span class="skill-name">${escapeHtml(skill.name)}</span></div><p class="missing-skill-rec">${escapeHtml(skill.evidence || '')}</p>`;
+                list.appendChild(item);
+            });
+        };
+        renderEvidenceList(partialList, skillGap.partially_matched_skills);
+        renderEvidenceList(additionalList, skillGap.additional_resume_skills);
 
         // Animate skill bars after a short delay
         setTimeout(() => {
@@ -509,6 +543,16 @@ document.addEventListener('DOMContentLoaded', () => {
             li.textContent = g;
             growthList.appendChild(li);
         });
+
+        const nextStepsList = document.getElementById('next-steps-list');
+        if (nextStepsList) {
+            nextStepsList.innerHTML = '';
+            (insights.recommended_next_steps || []).forEach(step => {
+                const li = document.createElement('li');
+                li.textContent = step;
+                nextStepsList.appendChild(li);
+            });
+        }
 
         // Trajectory
         document.getElementById('trajectory-text').textContent = insights.career_trajectory || 'No trajectory data available.';

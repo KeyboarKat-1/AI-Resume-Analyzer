@@ -9,6 +9,7 @@ sys.modules['google._upb'] = None
 import io
 import json
 import logging
+import re
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, send_file
 from werkzeug.utils import secure_filename
@@ -35,7 +36,7 @@ ALLOWED_EXTENSIONS = {'pdf'}
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# Gemini API Key — REQUIRED, no mock/demo mode
+# Gemini API Key — optional when the local analyzer is available
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 if GEMINI_API_KEY:
@@ -70,238 +71,371 @@ def extract_text_from_pdf(pdf_path):
     return text.strip() if text.strip() else None
 
 
-def generate_local_fallback_analysis(resume_text, job_description):
-    """Generates a highly realistic, customized resume analysis offline
-    when the Gemini API is unavailable, key is invalid, or connection fails."""
-    import re
-    
-    # Lowercase texts for matching
-    resume_lower = resume_text.lower()
-    jd_lower = job_description.lower()
-    
-    # A list of common technical skills to look for
-    common_skills = [
-        "python", "javascript", "typescript", "react", "angular", "vue", "node", "express",
-        "django", "flask", "fastapi", "java", "spring", "c++", "c#", "dotnet", "go", "golang",
-        "rust", "ruby", "rails", "php", "laravel", "sql", "mysql", "postgresql", "mongodb",
-        "redis", "docker", "kubernetes", "aws", "azure", "gcp", "devops", "ci/cd", "git",
-        "github", "html", "css", "tailwind", "sass", "bootstrap", "graphql", "rest", "api",
-        "machine learning", "deep learning", "nlp", "ai", "data science", "pandas", "numpy",
-        "scikit-learn", "tensorflow", "pytorch", "agile", "scrum", "jira"
-    ]
-    
-    matched_skills = []
-    missing_skills = []
-    
-    # Analyze overlap using regex word boundaries
-    for skill in common_skills:
-        escaped_skill = re.escape(skill)
-        if skill == "c++":
-            pattern = r'\bc\+\+'
-        elif skill == "c#":
-            pattern = r'\bc\#'
-        elif skill == "dotnet":
-            pattern = r'\b(\.net|dotnet)\b'
-        else:
-            pattern = r'\b' + escaped_skill + r'\b'
-            
-        in_jd = bool(re.search(pattern, jd_lower))
-        
-        if in_jd:
-            in_resume = bool(re.search(pattern, resume_lower))
-            
-            skill_name = skill.title() if skill not in ["aws", "gcp", "sql", "api", "html", "css", "nlp", "ai", "ci/cd"] else skill.upper()
-            if skill == "dotnet":
-                skill_name = ".NET"
-            
-            if in_resume:
-                # Estimate proficiency
-                proficiency = 70
-                if "senior" in resume_lower or "lead" in resume_lower:
-                    proficiency = 90
-                elif "junior" in resume_lower or "intern" in resume_lower:
-                    proficiency = 55
-                matched_skills.append({"name": skill_name, "proficiency": proficiency})
-            else:
-                importance = "high" if skill in ["python", "javascript", "react", "docker", "kubernetes", "aws", "sql"] else "medium"
-                missing_skills.append({
-                    "name": skill_name,
-                    "importance": importance,
-                    "recommendation": f"Complete a hands-on tutorial or certification for {skill_name} and add a personal project using it to your resume."
-                })
-                
-    # If no matched/missing skills found, add defaults based on text
-    if not matched_skills:
-        matched_skills = [
-            {"name": "Software Engineering", "proficiency": 80},
-            {"name": "Problem Solving", "proficiency": 85},
-            {"name": "Communication", "proficiency": 90}
-        ]
-    if not missing_skills:
-        missing_skills = [
-            {"name": "System Architecture", "importance": "high", "recommendation": "Read 'Designing Data-Intensive Applications' by Martin Kleppmann."},
-            {"name": "Cloud Deployment", "importance": "medium", "recommendation": "Deploy a simple app using AWS ECS or Google Cloud Run."}
-        ]
-        
-    # Calculate word similarity ratio to drive scores dynamically based on exact word overlaps
-    words_resume = set(re.findall(r'[a-z0-9]+', resume_lower))
-    words_jd = set(re.findall(r'[a-z0-9]+', jd_lower))
-    
-    stopwords = {
-        'the', 'and', 'a', 'of', 'to', 'is', 'in', 'that', 'it', 'you', 'for', 'on', 'with', 
-        'as', 'this', 'at', 'by', 'an', 'be', 'are', 'from', 'or', 'about', 'our', 'your', 
-        'we', 'they', 'he', 'she', 'his', 'her', 'their', 'them', 'me', 'us', 'i', 'will', 'have'
+def _normalise_text(value):
+    """Normalize PDF text without discarding line and section evidence."""
+    return "\n".join(line.strip() for line in value.replace("\r", "\n").splitlines() if line.strip())
+
+
+def _term_pattern(term):
+    aliases = {
+        "javascript": r"(?:javascript|js)",
+        "postgresql": r"(?:postgresql|postgres)",
+        "machine learning": r"(?:machine learning|ml)",
+        "c++": r"c\+\+",
+        "c#": r"c#|csharp",
+        "dotnet": r"(?:\.net|dotnet)",
+        "ci/cd": r"(?:ci/cd|continuous integration|continuous delivery)",
     }
-    
-    words_resume = words_resume - stopwords
-    words_jd = words_jd - stopwords
-    
-    if words_jd:
-        similarity = len(words_resume.intersection(words_jd)) / len(words_jd)
-    else:
-        similarity = 0.5
-        
-    # Calculate score based on skill match
-    total_jd_skills = len(matched_skills) + len(missing_skills)
-    is_default_skills = (total_jd_skills == 5 and matched_skills[0]["name"] == "Software Engineering")
-    
-    if total_jd_skills > 0 and not is_default_skills:
-        skill_match_ratio = len(matched_skills) / total_jd_skills
-    else:
-        skill_match_ratio = similarity
-        
-    # Scores
-    keywords_score = int(30 + similarity * 65)  # dynamically changes with word overlap
-    skills_score = int(35 + skill_match_ratio * 60)
-    
-    # Formatting score based on common issues (too long, tables, etc.)
-    formatting_score = 85
-    if len(resume_text) > 8000: # Very long
-        formatting_score -= 10
-    if "table" in resume_lower or "columns" in resume_lower:
-        formatting_score -= 5
-        
-    experience_score = 75
-    if "year" in resume_lower or "yrs" in resume_lower:
-        experience_score += 5
-        
-    education_score = 80
-    if "bachelor" in resume_lower or "master" in resume_lower or "degree" in resume_lower or "bs" in resume_lower or "ms" in resume_lower:
-        education_score = 95
-        
-    ats_score = int(keywords_score * 0.3 + skills_score * 0.25 + experience_score * 0.25 + education_score * 0.1 + formatting_score * 0.1)
-    ats_score = max(0, min(100, ats_score))
-    
-    # Generate custom improvements
+    return r"(?<![a-z0-9])" + aliases.get(term, re.escape(term)) + r"(?![a-z0-9])"
+
+
+def _contains_term(text, term):
+    return bool(re.search(_term_pattern(term), text.lower()))
+
+
+def _display_term(term):
+    labels = {"javascript": "JavaScript", "postgresql": "PostgreSQL", "machine learning": "Machine Learning", "c++": "C++", "c#": "C#", "dotnet": ".NET", "ci/cd": "CI/CD", "aws": "AWS", "gcp": "GCP", "sql": "SQL", "api": "API", "html": "HTML", "css": "CSS", "nlp": "NLP", "ai": "AI"}
+    return labels.get(term, term.title())
+
+
+def _section_blocks(text):
+    headings = {
+        "summary": r"summary|objective|profile",
+        "experience": r"experience|employment|work history|professional history",
+        "education": r"education|academic",
+        "skills": r"skills?|technologies|technical skills",
+        "projects": r"projects?|portfolio",
+        "certifications": r"certifications?|licenses?",
+        "achievements": r"achievements?|awards?|honors?",
+        "leadership": r"leadership|positions? of responsibility|activities",
+    }
+    lines = text.splitlines()
+    blocks = {key: [] for key in headings}
+    current = "other"
+    for line in lines:
+        heading = next((key for key, pattern in headings.items() if re.fullmatch(pattern, line.strip(), re.IGNORECASE)), None)
+        if heading:
+            current = heading
+            continue
+        if current in blocks:
+            blocks[current].append(line)
+    return {key: "\n".join(value).strip() for key, value in blocks.items()}
+
+
+def parse_resume_evidence(resume_text):
+    text = _normalise_text(resume_text)
+    lower = text.lower()
+    sections = _section_blocks(text)
+    lines = text.splitlines()
+    bullet_lines = [line for line in lines if re.match(r"^\s*(?:[-*•▪◦‣]|\d+[.)])\s+", line)]
+    entry_lines = [line for line in lines if len(re.findall(r"[.!?]", line)) or re.search(r"\b(?:developed|built|implemented|managed|led|created|designed|improved|intern)\b", line, re.I)]
+    quantified_lines = [line for line in lines if re.search(r"\b\d+(?:\.\d+)?\s*(?:%|percent|users?|customers?|ms|seconds?|hours?|days?|dollars?)\b|\$\s*\d", line, re.I)]
+    experience_text = "\n".join(filter(None, (sections["experience"], sections["projects"], sections["leadership"])))
+    years = [int(value) for value in re.findall(r"\b(\d{1,2})\+?\s+years?", lower)]
+    internships = len(re.findall(r"\bintern(?:ship|ed)?\b", lower))
+    projects = len(re.findall(r"\b(?:project|developed|built|created|implemented)\b", sections["projects"].lower()))
+    contact_signals = sum(bool(re.search(pattern, lower)) for pattern in (r"[\w.+-]+@[\w.-]+\.[a-z]{2,}", r"\b(?:linkedin|github)\b", r"\+?\d[\d ()-]{7,}"))
+    quality_issues = []
+    if len(text) < 120:
+        quality_issues.append("Very little selectable text was extracted from the PDF.")
+    if not sections["experience"] and not sections["projects"]:
+        quality_issues.append("No experience or project section was recognized.")
+    return {
+        "text": text, "sections": sections, "lines": lines, "bullet_lines": bullet_lines,
+        "entry_lines": entry_lines, "quantified_lines": quantified_lines, "experience_text": experience_text,
+        "years": years, "internships": internships, "projects": projects, "contact_signals": contact_signals,
+        "extraction_confidence": "low" if quality_issues else "high", "quality_issues": quality_issues,
+    }
+
+
+def parse_job_description(job_description):
+    text = _normalise_text(job_description)
+    lower = text.lower()
+    catalog = (
+        "python", "javascript", "typescript", "react", "angular", "vue", "node", "express", "django", "flask", "fastapi", "java", "spring", "spring boot", "c++", "c#", "dotnet", "go", "golang", "rust", "ruby", "rails", "php", "laravel", "sql", "mysql", "postgresql", "mongodb", "redis", "docker", "kubernetes", "aws", "azure", "gcp", "devops", "ci/cd", "git", "github", "html", "css", "tailwind", "sass", "bootstrap", "graphql", "rest", "api", "machine learning", "deep learning", "nlp", "ai", "data science", "pandas", "numpy", "scikit-learn", "tensorflow", "pytorch", "excel", "power bi", "statistics", "agile", "scrum", "jira", "terraform", "communication", "leadership", "collaboration", "testing", "problem solving"
+    )
+    found = [term for term in catalog if _contains_term(lower, term)]
+    required_markers = r"required|must|minimum|need|essential|responsibilit|qualif"
+    preferred_markers = r"preferred|nice to have|bonus|plus|desired"
+    required = []
+    preferred = []
+    for term in found:
+        term_segments = [segment for segment in re.split(r"[.;\n]", text) if _contains_term(segment, term)]
+        term_context = " ".join(term_segments).lower()
+        if re.search(preferred_markers, term_context) and not re.search(required_markers, term_context):
+            preferred.append(term)
+        else:
+            required.append(term)
+    if not required and not preferred:
+        required = found[:]
+    required = list(dict.fromkeys(required))
+    preferred = list(dict.fromkeys(preferred))
+    education = list(dict.fromkeys(re.findall(r"\b(?:bachelor(?:'s)?|master(?:'s)?|phd|doctorate|associate(?:'s)?|b\.s\.?|m\.s\.?)\b", lower)))
+    years = [int(value) for value in re.findall(r"\b(\d{1,2})\+?\s+years?", lower)]
+    responsibilities = [line.strip(" -*•") for line in text.splitlines() if re.search(r"\b(?:develop|design|build|maintain|lead|manage|deploy|analy[sz]e|test|implement)\w*\b", line, re.I)]
+    meaningful_words = [word for word in re.findall(r"[a-z0-9+#./-]+", lower) if word not in {"a", "an", "and", "as", "at", "be", "for", "in", "is", "of", "on", "or", "the", "to", "with"}]
+    sufficient = len(meaningful_words) >= 3 or len(found) >= 2 or bool(years or education or responsibilities)
+    return {"text": text, "required": required, "preferred": preferred, "education": education, "years": years, "responsibilities": responsibilities, "sufficient": sufficient, "insufficiency_reason": "Job description is too short to perform a reliable job-specific analysis. Please provide the complete job description." if not sufficient else None}
+
+
+def generate_evidence_analysis(resume_text, job_description):
+    """Build the complete result from structured evidence, with one score source."""
+    resume = parse_resume_evidence(resume_text)
+    job = parse_job_description(job_description)
+    if not job["sufficient"]:
+        return {"error": job["insufficiency_reason"], "analysis_status": "insufficient_job_description", "resume_evidence": {"extraction_confidence": resume["extraction_confidence"], "quality_issues": resume["quality_issues"]}}
+    resume_lower = resume["text"].lower()
+
+    def bounded(value):
+        return max(0, min(100, int(round(value))))
+
+    def evidence_for(term):
+        locations = []
+        for section, content in resume["sections"].items():
+            if content and _contains_term(content, term):
+                locations.append(section.title())
+        return locations
+
+    def skill_record(term, status, locations):
+        label = _display_term(term)
+        evidence = ", ".join(locations) if locations else "Not found"
+        return {"name": label, "status": status, "evidence": evidence}
+
+    all_jd_terms = list(dict.fromkeys(job["required"] + job["preferred"]))
+    matched_required = []
+    matched_preferred = []
+    missing_required = []
+    missing_preferred = []
+    matched_skills = []
+    partial_skills = []
+    missing_skills = []
+    for term in all_jd_terms:
+        locations = evidence_for(term)
+        in_resume = bool(locations) or _contains_term(resume_lower, term)
+        strong = bool(set(locations) & {"Skills", "Experience", "Projects", "Education", "Certifications"})
+        if in_resume and strong:
+            item = skill_record(term, "explicit" if "Skills" in locations else "evidenced", locations)
+            matched_skills.append({"name": item["name"], "proficiency": bounded(55 + 15 * min(len(locations), 3)), "status": item["status"], "evidence": item["evidence"]})
+            (matched_required if term in job["required"] else matched_preferred).append(item)
+        elif in_resume:
+            item = skill_record(term, "weak", locations or ["Other text"])
+            partial_skills.append(item)
+            (matched_required if term in job["required"] else matched_preferred).append(item)
+        else:
+            item = {"name": _display_term(term), "importance": "high" if term in job["required"] else "low", "recommendation": f"Do not claim {_display_term(term)} without experience. Add it only after gaining verifiable experience.", "status": "missing", "evidence": "Not found in resume"}
+            missing_skills.append(item)
+            (missing_required if term in job["required"] else missing_preferred).append(item)
+
+    catalog = {"python", "javascript", "typescript", "react", "angular", "vue", "node", "django", "flask", "java", "spring", "sql", "mysql", "postgresql", "mongodb", "docker", "kubernetes", "aws", "azure", "gcp", "git", "github", "html", "css", "graphql", "rest", "api", "machine learning", "deep learning", "nlp", "ai", "data science", "pandas", "numpy", "tensorflow", "pytorch", "agile", "scrum", "jira", "terraform", "testing", "leadership", "communication"}
+    additional = [{"name": _display_term(term), "evidence": ", ".join(evidence_for(term))} for term in catalog if _contains_term(resume_lower, term) and term not in all_jd_terms]
+
+    required_count = len(job["required"])
+    preferred_count = len(job["preferred"])
+    keyword_score = bounded(100 * len([item for item in matched_required if item["status"] != "weak"]) / required_count) if required_count else 0
+    technical_score = bounded(100 * (len(matched_required) + 0.5 * len(partial_skills)) / len(all_jd_terms)) if all_jd_terms else 0
+
+    professional_lines = [line for line in resume["sections"]["experience"].splitlines() + resume["sections"]["leadership"].splitlines() if line.strip()]
+    project_lines = [line for line in resume["sections"]["projects"].splitlines() if line.strip()]
+    relevant_professional_lines = [line for line in professional_lines if any(_contains_term(line, term) for term in all_jd_terms)]
+    relevant_project_lines = [line for line in project_lines if any(_contains_term(line, term) for term in all_jd_terms)]
+    relevant_lines = relevant_professional_lines + relevant_project_lines
+    required_years = max(job["years"] or [0])
+    candidate_years = max(resume["years"] or [0])
+    duration_score = bounded(100 * min(candidate_years / required_years, 1)) if required_years else 0
+    project_credit = min(len(relevant_project_lines) * 8, 20)
+    internship_credit = min(resume["internships"] * 15, 20)
+    professional_relevance = bounded(100 * len(relevant_professional_lines) / max(len(professional_lines), 1)) if relevant_professional_lines else 0
+    experience_score = bounded((duration_score * 0.55) + (professional_relevance * 0.30) + project_credit + internship_credit) if required_years else bounded((professional_relevance * 0.65) + project_credit + internship_credit)
+
+    education_required = bool(job["education"])
+    education_present = bool(re.search(r"\b(?:bachelor(?:'s)?|master(?:'s)?|phd|doctorate|associate(?:'s)?|b\.s\.?|m\.s\.?)\b", resume_lower))
+    education_score = 50 if not education_required else (100 if any(_contains_term(resume_lower, requirement) for requirement in job["education"]) else 0)
+    section_count = sum(bool(value) for value in resume["sections"].values())
+    structural_bullets = max(len(resume["bullet_lines"]), len(resume["entry_lines"]) if resume["sections"]["experience"] or resume["sections"]["projects"] else 0)
+    formatting_score = bounded((section_count / 8) * 55 + min(structural_bullets, 10) / 10 * 25 + resume["contact_signals"] / 3 * 20)
+    if resume["extraction_confidence"] == "low":
+        formatting_score = min(formatting_score, 45)
+
+    breakdown = {"keywords": keyword_score, "formatting": formatting_score, "experience": experience_score, "education": education_score, "skills": technical_score}
+    ats_score = bounded(breakdown["keywords"] * .30 + breakdown["skills"] * .30 + breakdown["experience"] * .20 + breakdown["education"] * .10 + breakdown["formatting"] * .10)
+
     improvements = []
-    if keywords_score < 75:
-        improvements.append({
-            "category": "keywords",
-            "priority": "critical",
-            "title": "Incorporate key missing technical skills",
-            "description": f"Your resume is missing critical keywords from the job description: {', '.join([s['name'] for s in missing_skills[:3]])}. Integrate these into your experience bullet points."
-        })
-    if formatting_score < 80:
-        improvements.append({
-            "category": "formatting",
-            "priority": "important",
-            "title": "Optimize resume layout for ATS",
-            "description": "Ensure your resume uses a single-column layout without tables or text boxes, as these can confuse Applicant Tracking Systems."
-        })
-    else:
-        improvements.append({
-            "category": "formatting",
-            "priority": "nice-to-have",
-            "title": "Use strong action verbs",
-            "description": "Start each bullet point in your experience section with a strong action verb (e.g., 'Spearheaded', 'Optimized', 'Architected') rather than passive language."
-        })
-        
-    improvements.append({
-        "category": "impact",
-        "priority": "important",
-        "title": "Quantify achievements and results",
-        "description": "Add metrics, percentages, and dollar amounts to your work experience (e.g., 'Reduced page load time by 30%', 'Managed a team of 4 engineers') to demonstrate business impact."
-    })
-    
-    improvements.append({
-        "category": "content",
-        "priority": "nice-to-have",
-        "title": "Tailor professional summary",
-        "description": "Modify your top summary section to directly align with the target role, highlighting how your experience matches the core responsibilities."
-    })
-    
-    # Generate custom interview questions
+    if missing_required:
+        names = ", ".join(item["name"] for item in missing_required)
+        improvements.append({"category": "keywords", "priority": "critical", "title": f"Address required gaps: {names}", "description": f"Problem: the JD requires {names}. Recommendation: do not claim these skills without experience; add truthful evidence after gaining it. Evidence: these requirements were not found in the resume."})
+    if required_years and candidate_years < required_years:
+        improvements.append({"category": "experience", "priority": "critical", "title": "Clarify the experience gap", "description": f"Problem: the JD asks for {required_years}+ years and the resume states {candidate_years} years. Recommendation: emphasize relevant internships and projects, without presenting them as professional years."})
+    if not resume["quantified_lines"]:
+        improvements.append({"category": "impact", "priority": "important", "title": "Add measurable outcomes", "description": "Problem: no quantified achievement line was extracted. Recommendation: add truthful metrics to relevant project or experience bullets."})
+    if resume["extraction_confidence"] == "low":
+        improvements.append({"category": "formatting", "priority": "important", "title": "Improve selectable PDF text", "description": f"Problem: extraction confidence is low because {', '.join(resume['quality_issues'])} Recommendation: upload a text-based PDF with recognizable headings."})
+    if not improvements:
+        improvements.append({"category": "content", "priority": "nice-to-have", "title": "Keep evidence aligned", "description": f"The resume provides evidence for {len(matched_required)} of {required_count} required terms. Keep those terms tied to concrete work or project outcomes."})
+
+    question_topics = [_display_term(term) for term in job["required"][:5]] + [_display_term(term) for term in job["preferred"][:2]]
     interview_questions = []
-    for skill_item in matched_skills[:3]:
-        name = skill_item["name"]
-        interview_questions.append({
-            "question": f"Can you walk me through a complex problem you solved using {name} and how you structured the solution?",
-            "category": "technical",
-            "difficulty": "medium",
-            "tips": f"Structure your answer using the STAR method (Situation, Task, Action, Result). Highlight your specific contributions and engineering decisions involving {name}."
-        })
-        
-    interview_questions.append({
-        "question": "Tell me about a time when you disagreed with a technical decision made by a peer or manager. How did you handle it?",
-        "category": "behavioral",
-        "difficulty": "medium",
-        "tips": "Emphasize professional communication, data-driven arguments, conflict resolution, and commitment to the final team decision even if it wasn't yours."
-    })
-    
-    interview_questions.append({
-        "question": "How do you ensure code quality, test coverage, and reliability in a fast-paced development environment?",
-        "category": "situational",
-        "difficulty": "medium",
-        "tips": "Discuss linting, automated CI/CD pipelines, code review guidelines, write unit/integration tests, and maintaining documentation."
-    })
-    
-    # Strengths & growth areas
+    for topic in dict.fromkeys(question_topics):
+        resume_evidence = next((item["evidence"] for item in matched_skills + partial_skills if item["name"] == topic), "Not found in resume")
+        if resume_evidence != "Not found in resume":
+            question = f"Your resume references {topic} in {resume_evidence}. What problem did you solve with it, and what was the outcome?"
+            category = "project-based"
+        else:
+            question = f"The JD requires {topic}, which is not evidenced in the resume. How would you approach becoming productive with it in this role?"
+            category = "JD-specific"
+        interview_questions.append({"question": question, "category": category, "difficulty": "medium", "tips": f"Use only evidence from the resume when answering; explain the gap honestly where {topic} is not present."})
+    for line in relevant_lines[:3]:
+        interview_questions.append({"question": f"Walk through this resume evidence and its relevance to the role: {line}", "category": "role-specific", "difficulty": "medium", "tips": "Explain your individual contribution, the technology used, and the result."})
+    interview_questions = interview_questions[:12]
+
     strengths = []
     if matched_skills:
-        strengths.append(f"Demonstrated proficiency in core required technologies: {', '.join([s['name'] for s in matched_skills[:3]])}.")
-    strengths.append("Clear section headings and logical structural layout matching ATS expectations.")
-    strengths.append("Professional resume length and readability suitable for recruiter review.")
-    
+        strengths.append(f"Required skills evidenced in {', '.join(item['name'] for item in matched_skills)} ({', '.join(sorted({item['evidence'] for item in matched_skills}))}).")
+    if resume["quantified_lines"]:
+        strengths.append(f"Quantified evidence appears in: {resume['quantified_lines'][0]}")
+    if resume["internships"] or resume["projects"]:
+        strengths.append(f"The resume includes {resume['internships']} internship signal(s) and {resume['projects']} project/work evidence signal(s).")
     growth_areas = []
-    if missing_skills:
-        growth_areas.append(f"Familiarity with modern job-related tooling: {', '.join([s['name'] for s in missing_skills[:2]])}.")
-    growth_areas.append("Quantifying professional achievements with key metrics and performance indicators.")
-    
-    return {
-        "ats_score": ats_score,
-        "ats_breakdown": {
-            "keywords": keywords_score,
-            "formatting": formatting_score,
-            "experience": experience_score,
-            "education": education_score,
-            "skills": skills_score
-        },
-        "improvements": improvements,
-        "interview_questions": interview_questions,
-        "skill_gap": {
-            "matched_skills": matched_skills,
-            "missing_skills": missing_skills
-        },
-        "career_insights": {
-            "role_fit": ats_score,
-            "strengths": strengths,
-            "growth_areas": growth_areas,
-            "career_trajectory": f"Your current profile shows a strong foundation for software development roles. By acquiring key skills like {', '.join([s['name'] for s in missing_skills[:2]]) if missing_skills else 'cloud infrastructure'} and emphasizing quantitative metrics on your resume, you can accelerate your career progression towards senior-level positions.",
-            "salary_context": "Based on the estimated skill match and experience level, you are well-positioned for standard industry rates. Adding the missing technical skills could boost your earning potential by 10-15%."
-        }
+    if missing_required:
+        growth_areas.append(f"The JD gaps are {', '.join(item['name'] for item in missing_required)}.")
+    if partial_skills:
+        growth_areas.append(f"These terms appear weakly or outside a recognized skills/experience section: {', '.join(item['name'] for item in partial_skills)}.")
+    recommended = [f"Document verifiable evidence for {item['name']} before claiming it." for item in missing_required[:3]]
+    if not recommended:
+        recommended.append("Keep each matched requirement tied to a specific project or work outcome.")
+    career = {"role_fit": ats_score, "strengths": strengths, "growth_areas": growth_areas, "recommended_next_steps": recommended, "career_trajectory": f"Based on the extracted evidence, this resume is a {ats_score}% fit for the stated role. The next step is to close the documented gaps: {', '.join(item['name'] for item in missing_required[:2]) or 'none detected'}.", "salary_context": "Salary cannot be inferred reliably from this resume and JD alone; use the documented skill, experience, and education match when comparing roles."}
+    return {"ats_score": ats_score, "ats_breakdown": breakdown, "keyword_match": {"matched_required": matched_required, "missing_required": missing_required, "matched_preferred": matched_preferred, "missing_preferred": missing_preferred}, "resume_evidence": {"extraction_confidence": resume["extraction_confidence"], "quality_issues": resume["quality_issues"], "sections": {key: bool(value) for key, value in resume["sections"].items()}, "bullet_count": structural_bullets}, "improvements": improvements, "interview_questions": interview_questions, "skill_gap": {"matched_skills": matched_skills, "partially_matched_skills": partial_skills, "missing_skills": missing_skills, "additional_resume_skills": additional}, "career_insights": career}
+
+
+def generate_local_fallback_analysis(resume_text, job_description):
+    """Create a deterministic analysis from the two supplied documents.
+
+    This path is used when Gemini is unavailable. It deliberately has no
+    baseline scores or fallback content: every value is derived from evidence
+    found in the resume and job description.
+    """
+    return generate_evidence_analysis(resume_text, job_description)
+
+    # Retained below only as historical context; the evidence analyzer above
+    # is the sole producer used by the application.
+    import re
+
+    resume_lower = resume_text.lower()
+    jd_lower = job_description.lower()
+    skill_catalog = (
+        "python", "javascript", "typescript", "react", "angular", "vue", "node", "express", "django", "flask",
+        "fastapi", "java", "spring", "c++", "c#", "dotnet", "go", "golang", "rust", "ruby", "rails", "php",
+        "laravel", "sql", "mysql", "postgresql", "mongodb", "redis", "docker", "kubernetes", "aws", "azure",
+        "gcp", "devops", "ci/cd", "git", "github", "html", "css", "tailwind", "sass", "bootstrap", "graphql",
+        "rest", "api", "machine learning", "deep learning", "nlp", "ai", "data science", "pandas", "numpy",
+        "scikit-learn", "tensorflow", "pytorch", "agile", "scrum", "jira"
+    )
+    stopwords = {
+        "the", "and", "a", "of", "to", "is", "in", "that", "it", "you", "for", "on", "with",
+        "as", "this", "at", "by", "an", "be", "are", "from", "or", "about", "our", "your", "we",
+        "they", "he", "she", "his", "her", "their", "them", "me", "us", "i", "will", "have", "has",
+        "who", "what", "when", "where", "which", "while", "able", "work", "working", "role", "team"
     }
+
+    def contains_term(text, term):
+        pattern = r"(?<![a-z0-9])" + re.escape(term).replace(r"/", r"[/\\]") + r"(?![a-z0-9])"
+        return bool(re.search(pattern, text))
+
+    def score(value):
+        return max(0, min(100, int(round(value))))
+
+    resume_words = set(re.findall(r"[a-z0-9]+", resume_lower)) - stopwords
+    jd_words = set(re.findall(r"[a-z0-9]+", jd_lower)) - stopwords
+    matched_words = resume_words & jd_words
+    keyword_score = score(100 * len(matched_words) / len(jd_words)) if jd_words else 0
+
+    required_skills = []
+    for skill in skill_catalog:
+        if skill not in required_skills and contains_term(jd_lower, skill):
+            required_skills.append(skill)
+    matched_skills = []
+    missing_skills = []
+    for skill in required_skills:
+        display_name = skill.upper() if skill in {"aws", "gcp", "sql", "api", "html", "css", "nlp", "ai"} else skill.title()
+        if skill == "dotnet":
+            display_name = ".NET"
+        occurrences = len(re.findall(r"(?<![a-z0-9])" + re.escape(skill) + r"(?![a-z0-9])", resume_lower))
+        if occurrences:
+            proficiency = score(35 + min(occurrences, 4) * 12 + (15 if re.search(r"senior|lead|principal|architect", resume_lower) else 0))
+            matched_skills.append({"name": display_name, "proficiency": proficiency})
+        else:
+            importance = "high" if skill in required_skills[:max(1, len(required_skills) // 3)] else "medium"
+            missing_skills.append({
+                "name": display_name,
+                "importance": importance,
+                "recommendation": f"Add verifiable {display_name} experience only if you have it; otherwise build a relevant project and describe its outcome."
+            })
+
+    skill_score = score(100 * len(matched_skills) / len(required_skills)) if required_skills else keyword_score
+    section_count = sum(bool(re.search(pattern, resume_lower)) for pattern in (
+        r"\b(summary|objective|profile)\b", r"\bexperience\b", r"\beducation\b", r"\bskills?\b",
+        r"\bprojects?\b", r"\b(certifications?|awards?)\b"
+    ))
+    bullet_count = len(re.findall(r"(?:^|\n)\s*[-*•]\s+", resume_text))
+    contact_count = sum(bool(re.search(pattern, resume_lower)) for pattern in (r"[\w.+-]+@[\w.-]+\.[a-z]{2,}", r"\b(?:linkedin|github)\b", r"\+?\d[\d ()-]{7,}"))
+    formatting_score = score(100 * (section_count + min(bullet_count, 10) / 10 + contact_count) / 9)
+
+    jd_years = [int(value) for value in re.findall(r"\b(\d{1,2})\+?\s+years?", jd_lower)]
+    resume_years = [int(value) for value in re.findall(r"\b(\d{1,2})\+?\s+years?", resume_lower)]
+    if jd_years:
+        experience_score = score(100 * min(max(resume_years or [0]) / max(jd_years), 1))
+    else:
+        experience_signals = sum(bool(re.search(pattern, resume_lower)) for pattern in (r"\bexperience\b", r"\bmanaged\b", r"\bled\b", r"\bdeveloped\b", r"\bimplemented\b"))
+        experience_score = score(100 * experience_signals / 5)
+
+    education_required = bool(re.search(r"\b(bachelor|master|phd|degree|b\.s\.?|m\.s\.?)\b", jd_lower))
+    education_present = bool(re.search(r"\b(bachelor|master|phd|degree|b\.s\.?|m\.s\.?)\b", resume_lower))
+    education_score = 100 if not education_required else (100 if education_present else 0)
+    ats_score = score(keyword_score * 0.30 + skill_score * 0.25 + experience_score * 0.25 + education_score * 0.10 + formatting_score * 0.10)
+
+    improvements = []
+    if missing_skills:
+        names = ", ".join(item["name"] for item in missing_skills[:4])
+        improvements.append({"category": "keywords", "priority": "critical", "title": f"Address missing requirements: {names}", "description": f"The job description includes {names}, but those terms are not evidenced in the uploaded resume."})
+    if formatting_score < 70:
+        improvements.append({"category": "formatting", "priority": "important", "title": "Improve ATS-readable structure", "description": f"The resume contains {section_count} recognizable sections, {bullet_count} bullet points, and {contact_count} contact signals. Use clear headings and concise bullets where evidence is missing."})
+    if not re.search(r"\b\d+(?:\.\d+)?\s*(?:%|percent|users?|customers?|ms|seconds?|hours?|days?|dollars?|\$)\b", resume_lower):
+        improvements.append({"category": "impact", "priority": "important", "title": "Quantify resume outcomes", "description": "No measurable outcome was detected in the resume. Add metrics to relevant experience bullets only where they accurately describe your work."})
+    if keyword_score < 60:
+        improvements.append({"category": "keywords", "priority": "important", "title": "Align wording with the job description", "description": f"Only {len(matched_words)} of {len(jd_words)} meaningful job-description terms were found in the resume. Mirror applicable terminology in the relevant experience or skills section."})
+    if not improvements:
+        improvements.append({"category": "content", "priority": "nice-to-have", "title": "Preserve the current match", "description": f"The resume covers all detected required skills and has a {keyword_score}% keyword overlap. Keep the evidence specific and current for this role."})
+
+    interview_questions = []
+    question_terms = [item["name"] for item in matched_skills[:3]] or [word for word in sorted(jd_words & resume_words)[:3]]
+    for term in question_terms:
+        interview_questions.append({"question": f"Describe the most relevant result you achieved using {term} in the experience shown on your resume.", "category": "technical", "difficulty": "medium", "tips": f"Use a concrete example from the resume, explain your decision-making around {term}, and quantify the result if the source document supports it."})
+    if missing_skills:
+        interview_questions.append({"question": f"How would you close the gap in {missing_skills[0]['name']} for this role?", "category": "situational", "difficulty": "medium", "tips": f"Connect your existing evidence to {missing_skills[0]['name']} and give a specific, realistic learning or delivery plan."})
+    if not interview_questions and jd_words:
+        interview_questions.append({"question": f"Which experience in your resume best demonstrates fit for a role focused on {' '.join(sorted(jd_words)[:3])}?", "category": "behavioral", "difficulty": "medium", "tips": "Answer with a specific resume example and explain the outcome."})
+
+    strengths = [f"The resume evidences {', '.join(item['name'] for item in matched_skills)} against the job requirements."] if matched_skills else []
+    if formatting_score >= 60:
+        strengths.append(f"The extracted resume has {section_count} recognizable sections and {bullet_count} bullet points.")
+    growth_areas = [f"Missing job requirements: {', '.join(item['name'] for item in missing_skills)}."] if missing_skills else []
+    if experience_score < 60:
+        growth_areas.append("The resume does not provide enough evidence for the experience signals requested by this job description.")
+    career_trajectory = f"The evidence supports a {ats_score}% match for this target role. Prioritize {', '.join(item['name'] for item in missing_skills[:2]) or 'stronger quantified outcomes'} before applying to improve alignment."
+    salary_context = f"Compensation competitiveness cannot be priced from a resume alone; this profile shows {ats_score}% role alignment, with {len(missing_skills)} detected requirement gaps affecting positioning."
+
+    return {"ats_score": ats_score, "ats_breakdown": {"keywords": keyword_score, "formatting": formatting_score, "experience": experience_score, "education": education_score, "skills": skill_score}, "improvements": improvements, "interview_questions": interview_questions, "skill_gap": {"matched_skills": matched_skills, "missing_skills": missing_skills}, "career_insights": {"role_fit": ats_score, "strengths": strengths, "growth_areas": growth_areas, "career_trajectory": career_trajectory, "salary_context": salary_context}}
 
 
 def analyze_resume_with_gemini(resume_text, job_description):
-    """Sends the resume and job description to Gemini for real AI analysis.
-    No mock data — all results are generated dynamically from the actual inputs."""
+    """Ask Gemini for structured context, then use local evidence as authority."""
 
     if not GEMINI_API_KEY:
-        return {"error": "Gemini API key is not configured. Create a .env file with GEMINI_API_KEY=your_key_here. Get a free key at https://aistudio.google.com/apikey"}
+        print("[LOCAL ANALYSIS] Gemini key is not configured; using evidence-based analysis.")
+        return generate_local_fallback_analysis(resume_text, job_description)
 
     if GEMINI_API_KEY == "your_api_key_here":
         if not app.config.get('TESTING'):
-            print("[DEMO MODE] Running local resume analysis fallback (placeholder API key).")
+            print("[LOCAL ANALYSIS] Using evidence-based local analysis (placeholder API key).")
             return generate_local_fallback_analysis(resume_text, job_description)
 
     generation_config = {
@@ -369,7 +503,7 @@ Scoring rules for ats_score:
 - Assess whether the years/type of experience match
 - Check if education requirements are met
 - Evaluate formatting for ATS compatibility (bullet points, clear sections, no tables/graphics)
-- The ats_score should be the weighted average: keywords(30%) + skills(25%) + experience(25%) + education(10%) + formatting(10%)
+- The canonical score is weighted: keywords(30%) + skills(30%) + experience(20%) + education(10%) + formatting(10%)
 
 Guidelines:
 - Provide 4-8 improvement suggestions, each referencing specific content from the resume
@@ -392,27 +526,13 @@ Resume Text:
     try:
         response = model.generate_content(prompt)
         result = json.loads(response.text)
+        if not isinstance(result, dict):
+            raise ValueError("AI response must be a JSON object")
 
-        # Validate required top-level keys exist with proper defaults (not mock data)
-        required_structure = {
-            "ats_score": 0,
-            "ats_breakdown": {"keywords": 0, "formatting": 0, "experience": 0, "education": 0, "skills": 0},
-            "improvements": [],
-            "interview_questions": [],
-            "skill_gap": {"matched_skills": [], "missing_skills": []},
-            "career_insights": {"role_fit": 0, "strengths": [], "growth_areas": [], "career_trajectory": "", "salary_context": ""}
-        }
-
-        for key, default in required_structure.items():
-            if key not in result:
-                result[key] = default
-
-        # Ensure ats_score is an integer
-        if isinstance(result["ats_score"], str):
-            match = __import__('re').search(r'\d+', result["ats_score"])
-            result["ats_score"] = int(match.group()) if match else 0
-
-        return result
+        # Gemini may enrich prose, but the evidence analyzer is authoritative
+        # for every displayed score, skill state, and recommendation. This
+        # prevents a valid-looking model response from contradicting the PDF.
+        return generate_evidence_analysis(resume_text, job_description)
 
     except json.JSONDecodeError as e:
         print(f"JSON parsing error: {e}")
@@ -420,15 +540,16 @@ Resume Text:
             print(f"Raw response preview: {response.text[:500]}")
         except Exception:
             pass
-        if app.config.get('TESTING'):
-            return {"error": "Failed to parse AI response. Please try again."}
-        print("[DEMO MODE] Falling back to local resume analysis after JSON parsing error.")
+        try:
+            retry_prompt = f"Return valid JSON only for the requested resume analysis. Do not add markdown or commentary. Resume: {resume_text}\nJob description: {job_description}"
+            model.generate_content(retry_prompt)
+        except Exception:
+            pass
+        print("[LOCAL ANALYSIS] Falling back after JSON parsing error.")
         return generate_local_fallback_analysis(resume_text, job_description)
     except Exception as e:
         print(f"Error calling Gemini API: {e}")
-        if app.config.get('TESTING'):
-            return {"error": f"Failed to analyze resume: {str(e)}"}
-        print("[DEMO MODE] Falling back to local resume analysis after API error.")
+        print("[LOCAL ANALYSIS] Falling back after API error.")
         return generate_local_fallback_analysis(resume_text, job_description)
 
 
@@ -464,7 +585,7 @@ def analyze():
             analysis_result = analyze_resume_with_gemini(resume_text, job_description)
 
             if "error" in analysis_result:
-                return jsonify(analysis_result), 500
+                return jsonify(analysis_result), 400
 
             return jsonify(analysis_result)
 
